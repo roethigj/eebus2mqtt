@@ -18,12 +18,11 @@ import (
 	"github.com/enbility/eebus-go/api"
 	"github.com/enbility/eebus-go/service"
 	ucapi "github.com/enbility/eebus-go/usecases/api"
-	"github.com/enbility/eebus-go/usecases/cem/vabd"
-	"github.com/enbility/eebus-go/usecases/cem/vapd"
 	cslpc "github.com/enbility/eebus-go/usecases/cs/lpc"
 	cslpp "github.com/enbility/eebus-go/usecases/cs/lpp"
-	eglpc "github.com/enbility/eebus-go/usecases/eg/lpc"
-	eglpp "github.com/enbility/eebus-go/usecases/eg/lpp"
+
+	// eglpc "github.com/enbility/eebus-go/usecases/eg/lpc"
+	// eglpp "github.com/enbility/eebus-go/usecases/eg/lpp"
 	"github.com/enbility/eebus-go/usecases/ma/mgcp"
 	shipapi "github.com/enbility/ship-go/api"
 	"github.com/enbility/ship-go/cert"
@@ -91,7 +90,7 @@ func init() {
 	}
 	cfgPath, err = os.Open(configfile)
 	if err != nil {
-		log.Fatalf("Could not open config file:", err)
+		log.Fatalf("Could not open config file: %s", err)
 	}
 	defer cfgPath.Close()
 
@@ -129,26 +128,7 @@ func init() {
 
 		cfg.RemoteSKI = "replace-with-remote-ski"
 		// choose a starting port and find the next free one
-		startPort := 4713
-		maxPort := startPort + 100
-		found := false
-		for p := startPort; p <= maxPort; p++ {
-			addr := fmt.Sprintf(":%d", p)
-			ln, err := net.Listen("tcp", addr)
-			if err == nil {
-				_ = ln.Close()
-				cfg.Port = p
-				found = true
-				break
-			}
-		}
-		if !found {
-			// fallback to 0 to let the OS pick a free port
-			fmt.Println("Info: no free port in range, falling back to 0 (auto).")
-			cfg.Port = 0
-		} else {
-			fmt.Println("Info: using port", cfg.Port)
-		}
+		cfg.Port = availablePort(4713)
 		config.Hems = cfg
 		cfgPath, _ = os.Create(configfile)
 		encoder := json.NewEncoder(cfgPath)
@@ -172,13 +152,11 @@ func init() {
 type hems struct {
 	myService *service.Service
 
-	uccslpc   ucapi.CsLPCInterface
-	uccslpp   ucapi.CsLPPInterface
-	uceglpc   ucapi.EgLPCInterface
-	uceglpp   ucapi.EgLPPInterface
-	ucmamgcp  ucapi.MaMGCPInterface
-	uccemvabd ucapi.CemVABDInterface
-	uccemvapd ucapi.CemVAPDInterface
+	uccslpc ucapi.CsLPCInterface
+	uccslpp ucapi.CsLPPInterface
+	//uceglpc   ucapi.EgLPCInterface
+	//uceglpp   ucapi.EgLPPInterface
+	ucmamgcp ucapi.MaMGCPInterface
 }
 
 func (h *hems) run() {
@@ -208,10 +186,10 @@ func (h *hems) run() {
 		log.Fatal(err)
 	}
 
-	port = cfg.Port
+	port = availablePort(cfg.Port)
 
 	configuration, err := api.NewConfiguration(
-		"eebus2mqtt", "eebus-go", "HEMS", "123456789",
+		"eebus2mqtt", "eebus2mqtt", "HEMS", "123456789",
 		[]shipapi.DeviceCategoryType{shipapi.DeviceCategoryTypeEnergyManagementSystem},
 		model.DeviceTypeTypeEnergyManagementSystem,
 		[]model.EntityTypeType{model.EntityTypeTypeCEM},
@@ -220,7 +198,7 @@ func (h *hems) run() {
 		println("Error creating configuration:", err)
 		log.Fatal(err)
 	}
-	configuration.SetAlternateIdentifier("EEBUS-HEMS-123456789")
+	configuration.SetAlternateIdentifier("eebus2mqtt-HEMS-123456789")
 
 	h.myService = service.NewService(configuration, h)
 	h.myService.SetLogging(h)
@@ -235,19 +213,18 @@ func (h *hems) run() {
 	h.myService.AddUseCase(h.uccslpc)
 	h.uccslpp = cslpp.NewLPP(localEntity, h.OnLPPEvent)
 	h.myService.AddUseCase(h.uccslpp)
-	h.uceglpc = eglpc.NewLPC(localEntity, nil)
-	h.myService.AddUseCase(h.uceglpc)
-	h.uceglpp = eglpp.NewLPP(localEntity, nil)
-	h.myService.AddUseCase(h.uceglpp)
+	// h.uceglpc = eglpc.NewLPC(localEntity, nil)
+	// h.myService.AddUseCase(h.uceglpc)
+	// h.uceglpp = eglpp.NewLPP(localEntity, nil)
+	// h.myService.AddUseCase(h.uceglpp)
 	h.ucmamgcp = mgcp.NewMGCP(localEntity, h.OnMGCPEvent)
 	h.myService.AddUseCase(h.ucmamgcp)
-	h.uccemvabd = vabd.NewVABD(localEntity, h.OnVABDEvent)
-	h.myService.AddUseCase(h.uccemvabd)
-	h.uccemvapd = vapd.NewVAPD(localEntity, h.OnVAPDEvent)
-	h.myService.AddUseCase(h.uccemvapd)
+	// h.uccemvabd = vabd.NewVABD(localEntity, h.OnVABDEvent)
+	// h.myService.AddUseCase(h.uccemvabd)
+	// h.uccemvapd = vapd.NewVAPD(localEntity, h.OnVAPDEvent)
+	// h.myService.AddUseCase(h.uccemvapd)
 
 	// Initialize local server data
-	_ = h.uccslpc.SetConsumptionNominalMax(32000)
 	_ = h.uccslpc.SetConsumptionLimit(ucapi.LoadLimit{
 		Value:        4200,
 		IsChangeable: true,
@@ -256,7 +233,6 @@ func (h *hems) run() {
 	_ = h.uccslpc.SetFailsafeConsumptionActivePowerLimit(4200, true)
 	_ = h.uccslpc.SetFailsafeDurationMinimum(2*time.Hour, true)
 
-	_ = h.uccslpp.SetProductionNominalMax(10000)
 	_ = h.uccslpp.SetProductionLimit(ucapi.LoadLimit{
 		Value:        10000,
 		IsChangeable: true,
@@ -274,6 +250,32 @@ func (h *hems) run() {
 	// print("test ski ", h.myService.LocalService().SKI())
 
 	h.myService.Start()
+}
+
+// Find available port
+func availablePort(port int) (hemsport int) {
+	startPort := port
+	maxPort := startPort + 100
+	found := false
+	for p := startPort; p <= maxPort; p++ {
+		addr := fmt.Sprintf(":%d", p)
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			_ = ln.Close()
+			hemsport = p
+			found = true
+			break
+		}
+	}
+	if !found {
+		// fallback to 0 to let the OS pick a free port
+		fmt.Println("Info: no free port in range, falling back to 0 (auto).")
+		port = 0
+	} else {
+		fmt.Println("Info: using port", hemsport)
+	}
+	return hemsport
+
 }
 
 // Controllable System LPC Event Handler
@@ -296,11 +298,41 @@ func (h *hems) OnLPCEvent(ski string, device spineapi.DeviceRemoteInterface, ent
 			client.Publish("eebus2mqtt/hems/lpc/active", 1, false, fmt.Sprintf("%t", currentLimit.IsActive))
 		}
 	case cslpc.DataUpdateHeartbeat:
-		if currentLimit, err := h.uccslpp.ProductionLimit(); err == nil {
-			fmt.Println("New LPC Limit set to", currentLimit.Value, "W. Is Active:", currentLimit.IsActive)
+		// publish everything on heartbeat
+		cnm, _ := h.uccslpc.ConsumptionNominalMax()
+		client.Publish("eebus2mqtt/hems/lpc/NominalMax", 1, false, fmt.Sprintf("%.f", cnm))
+		if currentLimit, err := h.uccslpc.ConsumptionLimit(); err == nil {
+
 			client.Publish("eebus2mqtt/hems/lpc/limit", 1, false, fmt.Sprintf("%.f", currentLimit.Value))
 			client.Publish("eebus2mqtt/hems/lpc/active", 1, false, fmt.Sprintf("%t", currentLimit.IsActive))
 		}
+		if currentLimit, isChangeable, err := h.uccslpc.FailsafeConsumptionActivePowerLimit(); err == nil {
+			fmt.Println("New LPP Failsafe Production Active Power Limit set to", currentLimit, "W")
+			fmt.Println("Is Changeable:", isChangeable)
+			client.Publish("eebus2mqtt/hems/lpc/failsafe_limit", 1, false, fmt.Sprintf("%.f", currentLimit))
+			client.Publish("eebus2mqtt/hems/lpc/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+		}
+		if duration, isChangeable, err := h.uccslpc.FailsafeDurationMinimum(); err == nil {
+			fmt.Println("New LPC Failsafe Duration Minimum set to", duration)
+			fmt.Println("Is Changeable:", isChangeable)
+			client.Publish("eebus2mqtt/hems/lpc/failsafe_duration", 1, false, fmt.Sprintf("%.f", duration.Seconds()))
+			client.Publish("eebus2mqtt/hems/lpc/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+		}
+	case cslpc.DataUpdateFailsafeConsumptionActivePowerLimit:
+		if currentLimit, isChangeable, err := h.uccslpc.FailsafeConsumptionActivePowerLimit(); err == nil {
+			fmt.Println("New LPP Failsafe Production Active Power Limit set to", currentLimit, "W")
+			fmt.Println("Is Changeable:", isChangeable)
+			client.Publish("eebus2mqtt/hems/lpc/failsafe_limit", 1, false, fmt.Sprintf("%.f", currentLimit))
+			client.Publish("eebus2mqtt/hems/lpc/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+		}
+	case cslpc.DataUpdateFailsafeDurationMinimum:
+		if duration, isChangeable, err := h.uccslpc.FailsafeDurationMinimum(); err == nil {
+			fmt.Println("New LPC Failsafe Duration Minimum set to", duration)
+			fmt.Println("Is Changeable:", isChangeable)
+			client.Publish("eebus2mqtt/hems/lpc/failsafe_duration", 1, false, fmt.Sprintf("%.f", duration.Seconds()))
+			client.Publish("eebus2mqtt/hems/lpc/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+		}
+
 	}
 }
 
@@ -324,54 +356,41 @@ func (h *hems) OnLPPEvent(ski string, device spineapi.DeviceRemoteInterface, ent
 			client.Publish("eebus2mqtt/hems/lpp/active", 1, false, fmt.Sprintf("%t", currentLimit.IsActive))
 		}
 	case cslpp.DataUpdateHeartbeat:
+		// publish everything on heartbeat
+		pnm, _ := h.uccslpp.ProductionNominalMax()
+		client.Publish("eebus2mqtt/hems/lpp/NominalMax", 1, false, fmt.Sprintf("%.f", pnm))
 		if currentLimit, err := h.uccslpp.ProductionLimit(); err == nil {
-			fmt.Println("New LPP Limit set to", currentLimit.Value, "W. Is Active:", currentLimit.IsActive)
 			client.Publish("eebus2mqtt/hems/lpp/limit", 1, false, fmt.Sprintf("%.f", currentLimit.Value))
 			client.Publish("eebus2mqtt/hems/lpp/active", 1, false, fmt.Sprintf("%t", currentLimit.IsActive))
 		}
+		if currentLimit, isChangeable, err := h.uccslpp.FailsafeProductionActivePowerLimit(); err == nil {
+			fmt.Println("New LPP Failsafe Production Active Power Limit set to", currentLimit, "W")
+			fmt.Println("Is Changeable:", isChangeable)
+			client.Publish("eebus2mqtt/hems/lpp/failsafe_limit", 1, false, fmt.Sprintf("%.f", currentLimit))
+			client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+		}
+		if duration, isChangeable, err := h.uccslpp.FailsafeDurationMinimum(); err == nil {
+			fmt.Println("New LPP Failsafe Duration Minimum set to", duration)
+			fmt.Println("Is Changeable:", isChangeable)
+			client.Publish("eebus2mqtt/hems/lpp/failsafe_duration", 1, false, fmt.Sprintf("%.f", duration.Seconds()))
+			client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+		}
 
-	}
-}
+	case cslpp.DataUpdateFailsafeProductionActivePowerLimit:
+		if currentLimit, isChangeable, err := h.uccslpp.FailsafeProductionActivePowerLimit(); err == nil {
+			fmt.Println("New LPP Failsafe Production Active Power Limit set to", currentLimit, "W")
+			fmt.Println("Is Changeable:", isChangeable)
+			client.Publish("eebus2mqtt/hems/lpp/failsafe_limit", 1, false, fmt.Sprintf("%.f", currentLimit))
+			client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+		}
+	case cslpp.DataUpdateFailsafeDurationMinimum:
+		if duration, isChangeable, err := h.uccslpp.FailsafeDurationMinimum(); err == nil {
+			fmt.Println("New LPP Failsafe Duration Minimum set to", duration)
+			fmt.Println("Is Changeable:", isChangeable)
+			client.Publish("eebus2mqtt/hems/lpp/failsafe_duration", 1, false, fmt.Sprintf("%.f", duration.Seconds()))
+			client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+		}
 
-// Cem VABD Event Handler
-
-func (h *hems) OnVABDEvent(ski string, device spineapi.DeviceRemoteInterface, entity spineapi.EntityRemoteInterface, event api.EventType) {
-	switch event {
-	case vabd.DataUpdateEnergyCharged:
-		if energy, err := h.uccemvabd.EnergyCharged(entity); err == nil {
-			fmt.Println("New VABD Energy Charged set to", energy, "Wh")
-		}
-	case vabd.DataUpdateEnergyDischarged:
-		if energy, err := h.uccemvabd.EnergyDischarged(entity); err == nil {
-			fmt.Println("New VABD Energy Discharged set to", energy, "Wh")
-		}
-	case vabd.DataUpdatePower:
-		if power, err := h.uccemvabd.Power(entity); err == nil {
-			fmt.Println("New VABD Power set to", power, "W")
-		}
-	case vabd.DataUpdateStateOfCharge:
-		if soc, err := h.uccemvabd.StateOfCharge(entity); err == nil {
-			fmt.Println("New VABD State of Charge set to", soc, "%")
-		}
-	}
-}
-
-// Cem VAPD Event Handler
-
-func (h *hems) OnVAPDEvent(ski string, device spineapi.DeviceRemoteInterface, entity spineapi.EntityRemoteInterface, event api.EventType) {
-	switch event {
-	case vapd.DataUpdatePVYieldTotal:
-		if yield, err := h.uccemvapd.PVYieldTotal(entity); err == nil {
-			fmt.Println("New VAPD PV Yield Total set to", yield, "Wh")
-		}
-	case vapd.DataUpdatePowerNominalPeak:
-		if peak, err := h.uccemvapd.PowerNominalPeak(entity); err == nil {
-			fmt.Println("New VAPD Power Nominal Peak set to", peak, "W")
-		}
-	case vapd.DataUpdatePower:
-		if power, err := h.uccemvapd.Power(entity); err == nil {
-			fmt.Println("New VAPD Power set to", power, "W")
-		}
 	}
 }
 
@@ -412,7 +431,12 @@ func (h *hems) OnMGCPEvent(ski string, device spineapi.DeviceRemoteInterface, en
 
 // EEBUSServiceHandler
 
-func (h *hems) RemoteSKIConnected(service api.ServiceInterface, ski string) {}
+func (h *hems) RemoteSKIConnected(service api.ServiceInterface, ski string) {
+	time.AfterFunc(1*time.Second, func() {
+		_ = h.uccslpc.SetConsumptionNominalMax(32000)
+		_ = h.uccslpp.SetProductionNominalMax(10000)
+	})
+}
 
 func (h *hems) RemoteSKIDisconnected(service api.ServiceInterface, ski string) {}
 
@@ -480,9 +504,9 @@ func mqttConnect() {
 
 // main app
 func main() {
+	mqttConnect()
 	h := hems{}
 	h.run()
-	mqttConnect()
 
 	// Clean exit to make sure mdns shutdown is invoked
 	sig := make(chan os.Signal, 1)
