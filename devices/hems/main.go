@@ -38,10 +38,11 @@ type Config struct {
 }
 
 type HemsConfig struct {
-	CertFile  string `json:"certFile"`
-	KeyFile   string `json:"keyFile"`
-	RemoteSKI string `json:"remoteSki"`
-	Port      int    `json:"port"`
+	CertFile    string `json:"certFile"`
+	KeyFile     string `json:"keyFile"`
+	RemoteSKI   string `json:"remoteSki"`
+	Port        int    `json:"port"`
+	InverterMax int    `json:"inverter_max"`
 }
 type MqttConfig struct {
 	Broker   string `json:"mqttBroker"`
@@ -53,7 +54,10 @@ type MqttConfig struct {
 var config Config
 var remoteSki string
 var configfile string = "./config.json"
+var logfile string = "./status.log"
 var client mqtt.Client
+var ekg time.Time = time.Now()
+var isFailsafe bool = false
 
 // CHANGE: attempt to read a JSON config file at startup and inject cert/key (and optional remote ski/port)
 // If a config is present and command-line args do not contain cert/key, we patch os.Args so existing run() logic
@@ -62,6 +66,11 @@ var client mqtt.Client
 // The config file path is "./config.json" by default. To change, set CONFIG_FILE env var.
 func init() {
 	var certificate tls.Certificate
+	// check for log
+	logPath, err := os.Open(logfile)
+	if err != nil {
+		log.Println("Info: no log file found at", logPath, "— I will generate it.")
+	}
 
 	// default config file path
 	cfgPath, err := os.Open(configfile)
@@ -70,10 +79,11 @@ func init() {
 		// Create basic config structure
 		config = Config{
 			Hems: HemsConfig{
-				CertFile:  "",
-				KeyFile:   "",
-				RemoteSKI: "",
-				Port:      0,
+				CertFile:    "",
+				KeyFile:     "",
+				RemoteSKI:   "",
+				Port:        0,
+				InverterMax: 10000,
 			},
 			Mqtt: MqttConfig{
 				Broker:   "",
@@ -234,12 +244,13 @@ func (h *hems) run() {
 	_ = h.uccslpc.SetFailsafeDurationMinimum(2*time.Hour, true)
 
 	_ = h.uccslpp.SetProductionLimit(ucapi.LoadLimit{
-		Value:        10000,
+		Value:        float64(cfg.InverterMax),
 		IsChangeable: true,
 		IsActive:     false,
 	})
 	_ = h.uccslpp.SetFailsafeProductionActivePowerLimit(4200, true)
 	_ = h.uccslpp.SetFailsafeDurationMinimum(2*time.Hour, true)
+	_ = h.uccslpp.SetProductionNominalMax(float64(cfg.InverterMax))
 
 	if len(remoteSki) == 0 {
 		fmt.Println("No Remote SKI provided, exiting.")
@@ -278,62 +289,118 @@ func availablePort(port int) (hemsport int) {
 
 }
 
-// Controllable System LPC Event Handler
+func EKG(h *hems) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	// wait := time.Now()
+	allowedproduction, _ := h.uccslpp.ProductionNominalMax()
+	limitactive := false
+	for range ticker.C {
+		wait := time.Now()
+		since := wait.Sub(ekg)
+		client.Publish("eebus2mqtt/hems/lpp/last_heartbeat", 1, false, fmt.Sprintf("%.f", since.Seconds()))
+		client.Publish("eebus2mqtt/hems/lpp/allowed_production", 1, false, fmt.Sprintf("%.f", allowedproduction))
+		client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", limitactive))
 
-func (h *hems) OnLPCEvent(ski string, device spineapi.DeviceRemoteInterface, entity spineapi.EntityRemoteInterface, event api.EventType) {
-	switch event {
-	case cslpc.WriteApprovalRequired:
-		// get pending writes
-		pendingWrites := h.uccslpc.PendingConsumptionLimits()
+		if since.Seconds() > 120 && !isFailsafe {
+			l, _, _ := h.uccslpp.FailsafeProductionActivePowerLimit()
+			allowedproduction = l
+			limitactive = true
+			isFailsafe = true
+			go FailsafeCountdown(h)
+		}
+		if since.Seconds() <= 120 {
+			isFailsafe = false
+			limit, _ := h.uccslpp.ProductionLimit()
+			if limit.IsActive {
+				allowedproduction = limit.Value
+				limitactive = limit.IsActive
+			} else {
+				allowedproduction, _ = h.uccslpp.ProductionNominalMax()
+				limitactive = false
+			}
 
-		// approve any write
-		for msgCounter, write := range pendingWrites {
-			fmt.Println("Approving LPC write with msgCounter", msgCounter, "and limit", write.Value, "W")
-			h.uccslpc.ApproveOrDenyConsumptionLimit(msgCounter, true, "")
 		}
-	case cslpc.DataUpdateLimit:
-		if currentLimit, err := h.uccslpc.ConsumptionLimit(); err == nil {
-			fmt.Println("New LPC Limit set to", currentLimit.Value, "W. Is Active:", currentLimit.IsActive)
-			client.Publish("eebus2mqtt/hems/lpc/limit", 1, false, fmt.Sprintf("%.f", currentLimit.Value))
-			client.Publish("eebus2mqtt/hems/lpc/active", 1, false, fmt.Sprintf("%t", currentLimit.IsActive))
-		}
-	case cslpc.DataUpdateHeartbeat:
-		// publish everything on heartbeat
-		cnm, _ := h.uccslpc.ConsumptionNominalMax()
-		client.Publish("eebus2mqtt/hems/lpc/NominalMax", 1, false, fmt.Sprintf("%.f", cnm))
-		if currentLimit, err := h.uccslpc.ConsumptionLimit(); err == nil {
-
-			client.Publish("eebus2mqtt/hems/lpc/limit", 1, false, fmt.Sprintf("%.f", currentLimit.Value))
-			client.Publish("eebus2mqtt/hems/lpc/active", 1, false, fmt.Sprintf("%t", currentLimit.IsActive))
-		}
-		if currentLimit, isChangeable, err := h.uccslpc.FailsafeConsumptionActivePowerLimit(); err == nil {
-			fmt.Println("New LPP Failsafe Production Active Power Limit set to", currentLimit, "W")
-			fmt.Println("Is Changeable:", isChangeable)
-			client.Publish("eebus2mqtt/hems/lpc/failsafe_limit", 1, false, fmt.Sprintf("%.f", currentLimit))
-			client.Publish("eebus2mqtt/hems/lpc/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
-		}
-		if duration, isChangeable, err := h.uccslpc.FailsafeDurationMinimum(); err == nil {
-			fmt.Println("New LPC Failsafe Duration Minimum set to", duration)
-			fmt.Println("Is Changeable:", isChangeable)
-			client.Publish("eebus2mqtt/hems/lpc/failsafe_duration", 1, false, fmt.Sprintf("%.f", duration.Seconds()))
-			client.Publish("eebus2mqtt/hems/lpc/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
-		}
-	case cslpc.DataUpdateFailsafeConsumptionActivePowerLimit:
-		if currentLimit, isChangeable, err := h.uccslpc.FailsafeConsumptionActivePowerLimit(); err == nil {
-			fmt.Println("New LPP Failsafe Production Active Power Limit set to", currentLimit, "W")
-			fmt.Println("Is Changeable:", isChangeable)
-			client.Publish("eebus2mqtt/hems/lpc/failsafe_limit", 1, false, fmt.Sprintf("%.f", currentLimit))
-			client.Publish("eebus2mqtt/hems/lpc/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
-		}
-	case cslpc.DataUpdateFailsafeDurationMinimum:
-		if duration, isChangeable, err := h.uccslpc.FailsafeDurationMinimum(); err == nil {
-			fmt.Println("New LPC Failsafe Duration Minimum set to", duration)
-			fmt.Println("Is Changeable:", isChangeable)
-			client.Publish("eebus2mqtt/hems/lpc/failsafe_duration", 1, false, fmt.Sprintf("%.f", duration.Seconds()))
-			client.Publish("eebus2mqtt/hems/lpc/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
-		}
-
 	}
+
+}
+
+func FailsafeCountdown(h *hems) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	d, _, _ := h.uccslpp.FailsafeDurationMinimum()
+	// d := 20 * time.Second
+	start := time.Now()
+	for range ticker.C {
+		wait := time.Now()
+		failsafe_time := wait.Sub(start)
+		if failsafe_time <= d && isFailsafe {
+			cd := d - failsafe_time
+			client.Publish("eebus2mqtt/hems/lpp/FailsafeCountdown", 1, false, fmt.Sprintf("%.f", cd.Seconds()))
+		} else {
+			client.Publish("eebus2mqtt/hems/lpp/FailsafeCountdown", 1, false, fmt.Sprintf("%.f", d.Seconds()))
+			ticker.Stop()
+		}
+	}
+
+}
+
+// Controllable System LPC Event Handler
+// output only mqqt for now
+func (h *hems) OnLPCEvent(ski string, device spineapi.DeviceRemoteInterface, entity spineapi.EntityRemoteInterface, event api.EventType) {
+	// 	switch event {
+	// 	case cslpc.WriteApprovalRequired:
+	// 		// get pending writes
+	// 		pendingWrites := h.uccslpc.PendingConsumptionLimits()
+
+	// 		// approve any write
+	// 		for msgCounter, write := range pendingWrites {
+	// 			fmt.Println("Approving LPC write with msgCounter", msgCounter, "and limit", write.Value, "W")
+	// 			h.uccslpc.ApproveOrDenyConsumptionLimit(msgCounter, true, "")
+	// 		}
+	// 	case cslpc.DataUpdateLimit:
+	// 		if currentLimit, err := h.uccslpc.ConsumptionLimit(); err == nil {
+	// 			//			fmt.Println("New LPC Limit set to", currentLimit.Value, "W. Is Active:", currentLimit.IsActive)
+	// 			client.Publish("eebus2mqtt/hems/lpc/limit", 1, false, fmt.Sprintf("%.f", currentLimit.Value))
+	// 			client.Publish("eebus2mqtt/hems/lpc/active", 1, false, fmt.Sprintf("%t", currentLimit.IsActive))
+	// 		}
+	// 	case cslpc.DataUpdateHeartbeat:
+	// 		// publish everything on heartbeat
+	// 		cnm, _ := h.uccslpc.ConsumptionNominalMax()
+	// 		client.Publish("eebus2mqtt/hems/lpc/NominalMax", 1, false, fmt.Sprintf("%.f", cnm))
+	// 		if currentLimit, err := h.uccslpc.ConsumptionLimit(); err == nil {
+
+	// 			client.Publish("eebus2mqtt/hems/lpc/limit", 1, false, fmt.Sprintf("%.f", currentLimit.Value))
+	// 			client.Publish("eebus2mqtt/hems/lpc/active", 1, false, fmt.Sprintf("%t", currentLimit.IsActive))
+	// 		}
+	// 		if currentLimit, isChangeable, err := h.uccslpc.FailsafeConsumptionActivePowerLimit(); err == nil {
+	// 			//			fmt.Println("New LPP Failsafe Production Active Power Limit set to", currentLimit, "W")
+	// 			//			fmt.Println("Is Changeable:", isChangeable)
+	// 			client.Publish("eebus2mqtt/hems/lpc/failsafe_limit", 1, false, fmt.Sprintf("%.f", currentLimit))
+	// 			client.Publish("eebus2mqtt/hems/lpc/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+	// 		}
+	// 		if duration, isChangeable, err := h.uccslpc.FailsafeDurationMinimum(); err == nil {
+	// 			//			fmt.Println("New LPC Failsafe Duration Minimum set to", duration)
+	// 			//			fmt.Println("Is Changeable:", isChangeable)
+	// 			client.Publish("eebus2mqtt/hems/lpc/failsafe_duration", 1, false, fmt.Sprintf("%.f", duration.Seconds()))
+	// 			client.Publish("eebus2mqtt/hems/lpc/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+	// 		}
+	// 	case cslpc.DataUpdateFailsafeConsumptionActivePowerLimit:
+	// 		if currentLimit, isChangeable, err := h.uccslpc.FailsafeConsumptionActivePowerLimit(); err == nil {
+	// 			//			fmt.Println("New LPP Failsafe Production Active Power Limit set to", currentLimit, "W")
+	// 			//			fmt.Println("Is Changeable:", isChangeable)
+	// 			client.Publish("eebus2mqtt/hems/lpc/failsafe_limit", 1, false, fmt.Sprintf("%.f", currentLimit))
+	// 			client.Publish("eebus2mqtt/hems/lpc/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+	// 		}
+	// 	case cslpc.DataUpdateFailsafeDurationMinimum:
+	// 		if duration, isChangeable, err := h.uccslpc.FailsafeDurationMinimum(); err == nil {
+	// 			//			fmt.Println("New LPC Failsafe Duration Minimum set to", duration)
+	// 			//			fmt.Println("Is Changeable:", isChangeable)
+	// 			client.Publish("eebus2mqtt/hems/lpc/failsafe_duration", 1, false, fmt.Sprintf("%.f", duration.Seconds()))
+	// 			client.Publish("eebus2mqtt/hems/lpc/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+	// 		}
+
+	// 	}
 }
 
 // Controllable System LPP Event Handler
@@ -352,43 +419,43 @@ func (h *hems) OnLPPEvent(ski string, device spineapi.DeviceRemoteInterface, ent
 	case cslpp.DataUpdateLimit:
 		if currentLimit, err := h.uccslpp.ProductionLimit(); err == nil {
 			fmt.Println("New LPP Limit set to", currentLimit.Value, "W. Is Active:", currentLimit.IsActive)
-			client.Publish("eebus2mqtt/hems/lpp/limit", 1, false, fmt.Sprintf("%.f", currentLimit.Value))
-			client.Publish("eebus2mqtt/hems/lpp/active", 1, false, fmt.Sprintf("%t", currentLimit.IsActive))
+			// client.Publish("eebus2mqtt/hems/lpp/limit", 1, false, fmt.Sprintf("%.f", currentLimit.Value))
+			// client.Publish("eebus2mqtt/hems/lpp/active", 1, false, fmt.Sprintf("%t", currentLimit.IsActive))
 		}
 	case cslpp.DataUpdateHeartbeat:
-		// publish everything on heartbeat
-		pnm, _ := h.uccslpp.ProductionNominalMax()
-		client.Publish("eebus2mqtt/hems/lpp/NominalMax", 1, false, fmt.Sprintf("%.f", pnm))
-		if currentLimit, err := h.uccslpp.ProductionLimit(); err == nil {
-			client.Publish("eebus2mqtt/hems/lpp/limit", 1, false, fmt.Sprintf("%.f", currentLimit.Value))
-			client.Publish("eebus2mqtt/hems/lpp/active", 1, false, fmt.Sprintf("%t", currentLimit.IsActive))
-		}
-		if currentLimit, isChangeable, err := h.uccslpp.FailsafeProductionActivePowerLimit(); err == nil {
-			fmt.Println("New LPP Failsafe Production Active Power Limit set to", currentLimit, "W")
-			fmt.Println("Is Changeable:", isChangeable)
-			client.Publish("eebus2mqtt/hems/lpp/failsafe_limit", 1, false, fmt.Sprintf("%.f", currentLimit))
-			client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
-		}
-		if duration, isChangeable, err := h.uccslpp.FailsafeDurationMinimum(); err == nil {
-			fmt.Println("New LPP Failsafe Duration Minimum set to", duration)
-			fmt.Println("Is Changeable:", isChangeable)
-			client.Publish("eebus2mqtt/hems/lpp/failsafe_duration", 1, false, fmt.Sprintf("%.f", duration.Seconds()))
-			client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
-		}
-
+		ekg = time.Now()
+	// 	// publish everything on heartbeat
+	// 	pnm, _ := h.uccslpp.ProductionNominalMax()
+	// 	client.Publish("eebus2mqtt/hems/lpp/NominalMax", 1, false, fmt.Sprintf("%.f", pnm))
+	// 	if currentLimit, err := h.uccslpp.ProductionLimit(); err == nil {
+	// 		client.Publish("eebus2mqtt/hems/lpp/limit", 1, false, fmt.Sprintf("%.f", currentLimit.Value))
+	// 		client.Publish("eebus2mqtt/hems/lpp/active", 1, false, fmt.Sprintf("%t", currentLimit.IsActive))
+	// 	}
+	// 	if currentLimit, isChangeable, err := h.uccslpp.FailsafeProductionActivePowerLimit(); err == nil {
+	// 		fmt.Println("New LPP Failsafe Production Active Power Limit set to", currentLimit, "W")
+	// 		fmt.Println("Is Changeable:", isChangeable)
+	// 		client.Publish("eebus2mqtt/hems/lpp/failsafe_limit", 1, false, fmt.Sprintf("%.f", currentLimit))
+	// 		client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+	// 	}
+	// 	if duration, isChangeable, err := h.uccslpp.FailsafeDurationMinimum(); err == nil {
+	// 		fmt.Println("New LPP Failsafe Duration Minimum set to", duration)
+	// 		fmt.Println("Is Changeable:", isChangeable)get
+	// 		client.Publish("eebus2mqtt/hems/lpp/failsafe_duration", 1, false, fmt.Sprintf("%.f", duration.Seconds()))
+	// 		client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+	// 	}
 	case cslpp.DataUpdateFailsafeProductionActivePowerLimit:
 		if currentLimit, isChangeable, err := h.uccslpp.FailsafeProductionActivePowerLimit(); err == nil {
 			fmt.Println("New LPP Failsafe Production Active Power Limit set to", currentLimit, "W")
 			fmt.Println("Is Changeable:", isChangeable)
 			client.Publish("eebus2mqtt/hems/lpp/failsafe_limit", 1, false, fmt.Sprintf("%.f", currentLimit))
-			client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+			// client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
 		}
 	case cslpp.DataUpdateFailsafeDurationMinimum:
 		if duration, isChangeable, err := h.uccslpp.FailsafeDurationMinimum(); err == nil {
 			fmt.Println("New LPP Failsafe Duration Minimum set to", duration)
 			fmt.Println("Is Changeable:", isChangeable)
 			client.Publish("eebus2mqtt/hems/lpp/failsafe_duration", 1, false, fmt.Sprintf("%.f", duration.Seconds()))
-			client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
+			// client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
 		}
 
 	}
@@ -435,6 +502,8 @@ func (h *hems) RemoteSKIConnected(service api.ServiceInterface, ski string) {
 	time.AfterFunc(1*time.Second, func() {
 		_ = h.uccslpc.SetConsumptionNominalMax(32000)
 		_ = h.uccslpp.SetProductionNominalMax(10000)
+		println("starte ekg")
+		go EKG(h)
 	})
 }
 
