@@ -111,7 +111,7 @@ func init() {
 	if cfg.CertFile == "" || cfg.KeyFile == "" {
 
 		// No config file present — not an error, just skip injection
-		println("Info: no config file found at", configfile, "— I will generate it.")
+		println("Info: no certificate file found at", configfile, "— I will generate it.")
 
 		certificate, err = cert.CreateCertificate("eebus2mqtt", "eebus-go", "HEMS", "123456789")
 		if err != nil {
