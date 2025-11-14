@@ -75,33 +75,27 @@ func init() {
 	// default config file path
 	cfgPath, err := os.Open(configfile)
 	if err != nil {
-		log.Println("Info: no config file found at", cfgPath, "— I will generate it.")
-		// Create basic config structure
-		config = Config{
-			Hems: HemsConfig{
-				CertFile:    "",
-				KeyFile:     "",
-				RemoteSKI:   "",
-				Port:        0,
-				InverterMax: 10000,
-			},
-			Mqtt: MqttConfig{
-				Broker:   "",
-				Username: "",
-				Port:     1883,
-				Password: "",
-			},
+		// check for HA config
+		if _, err := os.Stat("/config"); !os.IsNotExist(err) {
+			configfile = "/config/config.json"
+			cfgPath, err = os.Open(configfile)
+			if err != nil {
+				// HA first run?
+
+				generateConfic(configfile)
+			}
+		} else {
+			// not HA
+			generateConfic(configfile)
 		}
-		file, _ := os.Create(configfile)
-		encoder := json.NewEncoder(file)
-		encoder.SetIndent("", "  ")
-		_ = encoder.Encode(config)
-		file.Close()
+
 	}
-	cfgPath, err = os.Open(configfile)
-	if err != nil {
-		log.Fatalf("Could not open config file: %s", err)
-	}
+
+	// cfgPath, err = os.Open(configfile)
+	// if err != nil {
+	// 	log.Fatalf("Could not open config file: %s", err)
+	// }
+	println(cfgPath.Name())
 	defer cfgPath.Close()
 
 	decoder := json.NewDecoder(cfgPath)
@@ -157,6 +151,31 @@ func init() {
 
 	fmt.Println("Info: injected cert/key (and optional port/remoteSki) from config file:", cfgPath)
 
+}
+
+func generateConfic(conffile string) {
+	log.Println("Info: no config file found at", conffile, "— I will generate it.")
+	// Create basic config structure
+	config = Config{
+		Hems: HemsConfig{
+			CertFile:    "",
+			KeyFile:     "",
+			RemoteSKI:   "",
+			Port:        0,
+			InverterMax: 10000,
+		},
+		Mqtt: MqttConfig{
+			Broker:   "",
+			Username: "",
+			Port:     1883,
+			Password: "",
+		},
+	}
+	file, _ := os.Create(conffile)
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(config)
+	file.Close()
 }
 
 type hems struct {
