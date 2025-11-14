@@ -130,7 +130,7 @@ func init() {
 		pemdata = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: b})
 		cfg.KeyFile = string(pemdata)
 
-		cfg.RemoteSKI = "replace-with-remote-ski"
+		//cfg.RemoteSKI = "replace-with-remote-ski"
 		// choose a starting port and find the next free one
 		cfg.Port = availablePort(4713)
 		config.Hems = cfg
