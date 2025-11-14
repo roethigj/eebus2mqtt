@@ -83,12 +83,10 @@ func init() {
 				// HA first run?
 
 				generateConfic(configfile)
-				cfgPath, _ = os.Open(configfile)
 			}
 		} else {
 			// not HA
 			generateConfic(configfile)
-			cfgPath, _ = os.Open(configfile)
 		}
 
 	}
@@ -97,7 +95,8 @@ func init() {
 	// if err != nil {
 	// 	log.Fatalf("Could not open config file: %s", err)
 	// }
-	defer cfgPath.Close()
+	println(cfgPath.Name())
+	// defer cfgPath.Close()
 
 	decoder := json.NewDecoder(cfgPath)
 	err = decoder.Decode(&config)
@@ -111,7 +110,7 @@ func init() {
 	if cfg.CertFile == "" || cfg.KeyFile == "" {
 
 		// No config file present — not an error, just skip injection
-		println("Info: no certificate file found at", configfile, "— I will generate it.")
+		println("Info: no config file found at", configfile, "— I will generate it.")
 
 		certificate, err = cert.CreateCertificate("eebus2mqtt", "eebus-go", "HEMS", "123456789")
 		if err != nil {
