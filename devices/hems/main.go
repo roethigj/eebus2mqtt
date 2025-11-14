@@ -83,10 +83,12 @@ func init() {
 				// HA first run?
 
 				generateConfic(configfile)
+				cfgPath, _ = os.Open(configfile)
 			}
 		} else {
 			// not HA
 			generateConfic(configfile)
+			cfgPath, _ = os.Open(configfile)
 		}
 
 	}
