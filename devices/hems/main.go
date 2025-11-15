@@ -219,16 +219,16 @@ func (h *hems) run() {
 	port = availablePort(cfg.Port)
 
 	configuration, err := api.NewConfiguration(
-		"eebus2mqtt", "eebus2mqtt", "HEMS", "123456789",
+		"eebus2mqtt", "eebus2mqtt", "HEMS", "12345678911",
 		[]shipapi.DeviceCategoryType{shipapi.DeviceCategoryTypeEnergyManagementSystem},
 		model.DeviceTypeTypeEnergyManagementSystem,
 		[]model.EntityTypeType{model.EntityTypeTypeCEM},
-		port, certificate, time.Second*4)
+		port, certificate, time.Second*10)
 	if err != nil {
 		println("Error creating configuration:", err)
 		log.Fatal(err)
 	}
-	configuration.SetAlternateIdentifier("eebus2mqtt-HEMS-123456789")
+	configuration.SetAlternateIdentifier("eebus2mqtt-HEMS-1234567891")
 
 	h.myService = service.NewService(configuration, h)
 	h.myService.SetLogging(h)
@@ -537,6 +537,8 @@ func (h *hems) ServiceShipIDUpdate(ski string, shipdID string) {
 }
 
 func (h *hems) ServicePairingDetailUpdate(ski string, detail *shipapi.ConnectionStateDetail) {
+	log.Printf("🤝 Pairing update for %s: state=%d", ski, detail.State())
+
 	if ski == remoteSki && detail.State() == shipapi.ConnectionStateRemoteDeniedTrust {
 		fmt.Println("The remote service denied trust. Exiting.")
 		h.myService.CancelPairingWithSKI(ski)
