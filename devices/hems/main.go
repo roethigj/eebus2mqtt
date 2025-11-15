@@ -81,6 +81,7 @@ func init() {
 			cfgPath, err = os.Open(configfile)
 			if err != nil {
 				// HA first run?
+				log.Println("no HA config")
 
 				generateConfic(configfile)
 			}
@@ -110,7 +111,7 @@ func init() {
 	if cfg.CertFile == "" || cfg.KeyFile == "" {
 
 		// No config file present — not an error, just skip injection
-		println("Info: no config file found at", configfile, "— I will generate it.")
+		println("Info: no certificate file found at", configfile, "— I will generate it.")
 
 		certificate, err = cert.CreateCertificate("eebus2mqtt", "eebus-go", "HEMS", "123456789")
 		if err != nil {
@@ -130,7 +131,7 @@ func init() {
 		pemdata = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: b})
 		cfg.KeyFile = string(pemdata)
 
-		cfg.RemoteSKI = "replace-with-remote-ski"
+		// cfg.RemoteSKI = "replace-with-remote-ski"
 		// choose a starting port and find the next free one
 		cfg.Port = availablePort(4713)
 		config.Hems = cfg
