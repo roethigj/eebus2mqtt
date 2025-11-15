@@ -97,7 +97,7 @@ func init() {
 	// 	log.Fatalf("Could not open config file: %s", err)
 	// }
 	println(cfgPath.Name())
-	// defer cfgPath.Close()
+	defer cfgPath.Close()
 
 	decoder := json.NewDecoder(cfgPath)
 	err = decoder.Decode(&config)
