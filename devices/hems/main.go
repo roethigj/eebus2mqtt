@@ -532,7 +532,9 @@ func (h *hems) RemoteSKIDisconnected(service api.ServiceInterface, ski string) {
 func (h *hems) VisibleRemoteServicesUpdated(service api.ServiceInterface, entries []shipapi.RemoteService) {
 }
 
-func (h *hems) ServiceShipIDUpdate(ski string, shipdID string) {}
+func (h *hems) ServiceShipIDUpdate(ski string, shipdID string) {
+	println("shipID:", shipdID)
+}
 
 func (h *hems) ServicePairingDetailUpdate(ski string, detail *shipapi.ConnectionStateDetail) {
 	if ski == remoteSki && detail.State() == shipapi.ConnectionStateRemoteDeniedTrust {
