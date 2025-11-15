@@ -69,7 +69,7 @@ func init() {
 	// check for log
 	logPath, err := os.Open(logfile)
 	if err != nil {
-		log.Println("Info: no log file found at", logPath, "— I will generate it.")
+		log.Println("Info_init: no log file found at", logPath, "— I will generate it.")
 	}
 
 	// default config file path
