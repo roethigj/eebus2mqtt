@@ -322,14 +322,14 @@ func EKG(h *hems) {
 		client.Publish("eebus2mqtt/hems/lpp/allowed_production", 1, false, fmt.Sprintf("%.f", allowedproduction))
 		client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", limitactive))
 
-		if since.Seconds() > 30 && !isFailsafe {
+		if since.Seconds() > 120 && !isFailsafe {
 			l, _, _ := h.uccslpp.FailsafeProductionActivePowerLimit()
 			allowedproduction = l
 			limitactive = true
 			isFailsafe = true
 			go FailsafeCountdown(h)
 		}
-		if since.Seconds() <= 30 {
+		if since.Seconds() <= 120 {
 			isFailsafe = false
 			limit, _ := h.uccslpp.ProductionLimit()
 			if limit.IsActive {
