@@ -467,14 +467,14 @@ func (h *hems) OnLPPEvent(ski string, device spineapi.DeviceRemoteInterface, ent
 		if currentLimit, isChangeable, err := h.uccslpp.FailsafeProductionActivePowerLimit(); err == nil {
 			fmt.Println("New LPP Failsafe Production Active Power Limit set to", currentLimit, "W")
 			fmt.Println("Is Changeable:", isChangeable)
-			client.Publish("eebus2mqtt/hems/lpp/failsafe_limit", 1, false, fmt.Sprintf("%.f", currentLimit))
+			// client.Publish("eebus2mqtt/hems/lpp/failsafe_limit", 1, false, fmt.Sprintf("%.f", currentLimit))
 			// client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
 		}
 	case cslpp.DataUpdateFailsafeDurationMinimum:
 		if duration, isChangeable, err := h.uccslpp.FailsafeDurationMinimum(); err == nil {
 			fmt.Println("New LPP Failsafe Duration Minimum set to", duration)
 			fmt.Println("Is Changeable:", isChangeable)
-			client.Publish("eebus2mqtt/hems/lpp/failsafe_duration", 1, false, fmt.Sprintf("%.f", duration.Seconds()))
+			// client.Publish("eebus2mqtt/hems/lpp/failsafe_duration", 1, false, fmt.Sprintf("%.f", duration.Seconds()))
 			// client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
 		}
 
