@@ -34,3 +34,13 @@
 2025-11-17 22:32:00 | unlimitedControlled | 
 2025-11-17 22:32:11 | limited | 10000 W
 2025-11-17 22:32:31 | unlimitedControlled | 
+2025-11-17 22:38:58 | init | 
+2025-11-17 22:39:05 | unlimitedControlled | 
+2025-11-17 22:39:24 | limited | -1000 W
+2025-11-17 22:39:25 | unlimitedControlled | 
+2025-11-17 22:39:43 | limited | -1000 W
+2025-11-17 22:39:52 | unlimitedControlled | 
+2025-11-17 22:40:00 | limited | -1000 W
+2025-11-17 22:40:10 | unlimitedControlled | 
+2025-11-17 22:41:47 | limited | 10000 W
+2025-11-17 22:41:56 | unlimitedControlled | 
