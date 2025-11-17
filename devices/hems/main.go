@@ -82,7 +82,7 @@ func init() {
 	if err != nil {
 		//check for HA log
 		if _, err := os.Stat("/config"); !os.IsNotExist(err) {
-			configfile = "/config/status.log"
+			logfile = "/config/status.log"
 			_, err = os.Open(logfile)
 			if err != nil {
 				// HA first run?
