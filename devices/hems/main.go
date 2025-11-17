@@ -38,11 +38,11 @@ type Config struct {
 }
 
 type HemsConfig struct {
-	CertFile    string `json:"certFile"`
-	KeyFile     string `json:"keyFile"`
-	RemoteSKI   string `json:"remoteSki"`
-	Port        int    `json:"port"`
-	InverterMax int    `json:"inverter_max"`
+	CertFile  string `json:"certFile"`
+	KeyFile   string `json:"keyFile"`
+	RemoteSKI string `json:"remoteSki"`
+	Port      int    `json:"port"`
+	PVMax     int    `json:"pv_max"`
 }
 type MqttConfig struct {
 	Broker   string `json:"mqttBroker"`
@@ -59,6 +59,15 @@ var client mqtt.Client
 var ekg time.Time = time.Now()
 var isFailsafe bool = false
 
+type SystemState int
+
+const (
+	StateInit SystemState = iota
+	StateLimited
+	StateUnlimitedControlled
+	StateFailsafe
+)
+
 // CHANGE: attempt to read a JSON config file at startup and inject cert/key (and optional remote ski/port)
 // If a config is present and command-line args do not contain cert/key, we patch os.Args so existing run() logic
 // (which expects cert/key at os.Args[3]/os.Args[4] when len(os.Args) == 5) works unchanged.
@@ -67,10 +76,25 @@ var isFailsafe bool = false
 func init() {
 	var certificate tls.Certificate
 	// check for log
-	logPath, err := os.Open(logfile)
+	_, err := os.Open(logfile)
+	log.Println("Info_init: no log file found — I will generate it.")
+
 	if err != nil {
-		log.Println("Info_init: no log file found at", logPath, "— I will generate it.")
+		//check for HA log
+		if _, err := os.Stat("/data"); !os.IsNotExist(err) {
+			configfile = "/data/status.log"
+			_, err = os.Open(logfile)
+			if err != nil {
+				// HA first run?
+				_, _ = os.Create(logfile)
+			}
+		} else {
+			// not HA
+			_, _ = os.Create(logfile)
+		}
 	}
+
+	WriteLog(logfile, StateInit)
 
 	// default config file path
 	cfgPath, err := os.Open(configfile)
@@ -154,16 +178,56 @@ func init() {
 
 }
 
+func WriteLog(logfile string, state SystemState, remark ...string) error {
+	// Logdatei öffnen (muss existieren)
+	f, err := os.OpenFile(logfile, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// Zeitstempel
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+
+	// optionale Bemerkung
+	var note string
+	if len(remark) > 0 {
+		note = remark[0]
+	}
+
+	// Logzeile
+	line := fmt.Sprintf("%s | %s | %s\n", timestamp, state.String(), note)
+
+	// Schreiben
+	_, err = f.WriteString(line)
+	return err
+}
+
+func (s SystemState) String() string {
+	switch s {
+	case StateInit:
+		return "init"
+	case StateLimited:
+		return "limited"
+	case StateUnlimitedControlled:
+		return "unlimitedControlled"
+	case StateFailsafe:
+		return "failsafe"
+	default:
+		return "unknown"
+	}
+}
+
 func generateConfic(conffile string) {
 	log.Println("Info: no config file found at", conffile, "— I will generate it.")
 	// Create basic config structure
 	config = Config{
 		Hems: HemsConfig{
-			CertFile:    "",
-			KeyFile:     "",
-			RemoteSKI:   "",
-			Port:        0,
-			InverterMax: 10000,
+			CertFile:  "",
+			KeyFile:   "",
+			RemoteSKI: "",
+			Port:      0,
+			PVMax:     10000,
 		},
 		Mqtt: MqttConfig{
 			Broker:   "",
@@ -264,13 +328,13 @@ func (h *hems) run() {
 	_ = h.uccslpc.SetFailsafeDurationMinimum(2*time.Hour, true)
 
 	_ = h.uccslpp.SetProductionLimit(ucapi.LoadLimit{
-		Value:        float64(cfg.InverterMax),
+		Value:        float64(cfg.PVMax),
 		IsChangeable: true,
 		IsActive:     false,
 	})
 	_ = h.uccslpp.SetFailsafeProductionActivePowerLimit(4200, true)
 	_ = h.uccslpp.SetFailsafeDurationMinimum(2*time.Hour, true)
-	_ = h.uccslpp.SetProductionNominalMax(float64(cfg.InverterMax))
+	_ = h.uccslpp.SetProductionNominalMax(float64(cfg.PVMax))
 
 	if len(remoteSki) == 0 {
 		fmt.Println("No Remote SKI provided, exiting.")
@@ -312,34 +376,56 @@ func availablePort(port int) (hemsport int) {
 func EKG(h *hems) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	// wait := time.Now()
+	limited_written := false
+	unlimited_written := false
+
 	allowedproduction, _ := h.uccslpp.ProductionNominalMax()
-	limitactive := false
 	for range ticker.C {
 		wait := time.Now()
 		since := wait.Sub(ekg)
 		client.Publish("eebus2mqtt/hems/lpp/last_heartbeat", 1, false, fmt.Sprintf("%.f", since.Seconds()))
 		client.Publish("eebus2mqtt/hems/lpp/allowed_production", 1, false, fmt.Sprintf("%.f", allowedproduction))
-		client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", limitactive))
 
 		if since.Seconds() > 120 && !isFailsafe {
 			l, _, _ := h.uccslpp.FailsafeProductionActivePowerLimit()
 			allowedproduction = l
-			limitactive = true
 			isFailsafe = true
+
+			client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", isFailsafe))
+			WriteLog(logfile, StateFailsafe, fmt.Sprintf("%.0f W", allowedproduction))
 			go FailsafeCountdown(h)
 		}
 		if since.Seconds() <= 120 {
 			isFailsafe = false
-			limit, _ := h.uccslpp.ProductionLimit()
-			if limit.IsActive {
-				allowedproduction = limit.Value
-				limitactive = limit.IsActive
-			} else {
-				allowedproduction, _ = h.uccslpp.ProductionNominalMax()
-				limitactive = false
-			}
+			productionlimit, _ := h.uccslpp.ProductionLimit()
 
+			if productionlimit.IsActive && productionlimit.Duration.Seconds() > 0 {
+				allowedproduction = productionlimit.Value
+				client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", productionlimit.IsActive))
+				client.Publish("eebus2mqtt/hems/lpp/LimitCountdown", 1, false, fmt.Sprintf("%.f", productionlimit.Duration.Seconds()))
+
+				if !limited_written {
+					WriteLog(logfile, StateLimited, fmt.Sprintf("%.0f W", allowedproduction))
+					limited_written = true
+					unlimited_written = false
+				}
+
+			} else {
+				if productionlimit.Duration.Seconds() < 1 {
+					productionlimit.IsActive = false
+
+					allowedproduction, _ = h.uccslpp.ProductionNominalMax()
+					client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", productionlimit.IsActive))
+					client.Publish("eebus2mqtt/hems/lpp/LimitCountdown", 1, false, fmt.Sprintf("%.f", productionlimit.Duration.Seconds()))
+
+					if !unlimited_written {
+						WriteLog(logfile, StateUnlimitedControlled)
+						limited_written = false
+						unlimited_written = true
+					}
+				}
+
+			}
 		}
 	}
 
@@ -360,6 +446,8 @@ func FailsafeCountdown(h *hems) {
 		} else {
 			client.Publish("eebus2mqtt/hems/lpp/FailsafeCountdown", 1, false, fmt.Sprintf("%.f", d.Seconds()))
 			ticker.Stop()
+			// failsafe over
+			isFailsafe = false
 		}
 	}
 
@@ -434,7 +522,16 @@ func (h *hems) OnLPPEvent(ski string, device spineapi.DeviceRemoteInterface, ent
 		// approve any write
 		for msgCounter, write := range pendingWrites {
 			fmt.Println("Approving LPP write with msgCounter", msgCounter, "and limit", write.Value, "W")
-			h.uccslpp.ApproveOrDenyProductionLimit(msgCounter, true, "")
+			if write.IsActive {
+				if write.Duration == 0 {
+					h.uccslpp.ApproveOrDenyProductionLimit(msgCounter, false, "Duration zero")
+				} else {
+					h.uccslpp.ApproveOrDenyProductionLimit(msgCounter, true, "")
+
+				}
+			} else {
+				h.uccslpp.ApproveOrDenyProductionLimit(msgCounter, true, "")
+			}
 		}
 	case cslpp.DataUpdateLimit:
 		if currentLimit, err := h.uccslpp.ProductionLimit(); err == nil {
@@ -519,9 +616,10 @@ func (h *hems) OnMGCPEvent(ski string, device spineapi.DeviceRemoteInterface, en
 // EEBUSServiceHandler
 
 func (h *hems) RemoteSKIConnected(service api.ServiceInterface, ski string) {
-	time.AfterFunc(1*time.Second, func() {
+	cfg := config.Hems
+	time.AfterFunc(3*time.Second, func() {
 		_ = h.uccslpc.SetConsumptionNominalMax(32000)
-		_ = h.uccslpp.SetProductionNominalMax(10000)
+		_ = h.uccslpp.SetProductionNominalMax(float64(cfg.PVMax))
 		println("starte ekg")
 		go EKG(h)
 	})
