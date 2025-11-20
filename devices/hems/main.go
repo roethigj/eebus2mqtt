@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/ecdsa"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json" // CHANGE: added for reading config
@@ -43,6 +44,7 @@ type HemsConfig struct {
 	RemoteSKI string `json:"remoteSki"`
 	Port      int    `json:"port"`
 	PVMax     int    `json:"pv_max"`
+	SN        string `json:"serial_number"`
 }
 type MqttConfig struct {
 	Broker   string `json:"mqttBroker"`
@@ -66,6 +68,7 @@ const (
 	StateLimited
 	StateUnlimitedControlled
 	StateFailsafe
+	Info
 )
 
 // CHANGE: attempt to read a JSON config file at startup and inject cert/key (and optional remote ski/port)
@@ -132,12 +135,23 @@ func init() {
 
 	cfg := config.Hems
 
-	if cfg.CertFile == "" || cfg.KeyFile == "" {
+	if cfg.CertFile == "" || cfg.KeyFile == "" || cfg.SN == "" {
 
 		// No config file present — not an error, just skip injection
 		println("Info: no certificate file found at", configfile, "— I will generate it.")
 
-		certificate, err = cert.CreateCertificate("eebus2mqtt", "eebus-go", "HEMS", "123456789")
+		const digits = "0123456789"
+		b := make([]byte, 10)
+		_, err := rand.Read(b)
+		if err != nil {
+			return
+		}
+		for i := 0; i < 10; i++ {
+			b[i] = digits[int(b[i])%10]
+		}
+		cfg.SN = string(b)
+
+		certificate, err = cert.CreateCertificate("eebus2mqtt", "eebus-go", "HEMS", cfg.SN)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -148,7 +162,7 @@ func init() {
 		})
 		cfg.CertFile = string(pemdata)
 
-		b, err := x509.MarshalECPrivateKey(certificate.PrivateKey.(*ecdsa.PrivateKey))
+		b, err = x509.MarshalECPrivateKey(certificate.PrivateKey.(*ecdsa.PrivateKey))
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -221,6 +235,17 @@ func (s SystemState) String() string {
 func generateConfic(conffile string) {
 	log.Println("Info: no config file found at", conffile, "— I will generate it.")
 	// Create basic config structure
+	const digits = "0123456789"
+	b := make([]byte, 10)
+	_, err := rand.Read(b)
+	if err != nil {
+		return
+	}
+
+	for i := 0; i < 10; i++ {
+		b[i] = digits[int(b[i])%10]
+	}
+	sn := string(b)
 	config = Config{
 		Hems: HemsConfig{
 			CertFile:  "",
@@ -228,6 +253,7 @@ func generateConfic(conffile string) {
 			RemoteSKI: "",
 			Port:      0,
 			PVMax:     10000,
+			SN:        sn,
 		},
 		Mqtt: MqttConfig{
 			Broker:   "",
@@ -283,7 +309,7 @@ func (h *hems) run() {
 	port = availablePort(cfg.Port)
 
 	configuration, err := api.NewConfiguration(
-		"eebus2mqtt", "eebus2mqtt", "HEMS", "12345678911",
+		"eebus2mqtt", "eebus2mqtt", "HEMS", cfg.SN,
 		[]shipapi.DeviceCategoryType{shipapi.DeviceCategoryTypeEnergyManagementSystem},
 		model.DeviceTypeTypeEnergyManagementSystem,
 		[]model.EntityTypeType{model.EntityTypeTypeCEM},
@@ -292,7 +318,7 @@ func (h *hems) run() {
 		println("Error creating configuration:", err)
 		log.Fatal(err)
 	}
-	configuration.SetAlternateIdentifier("eebus2mqtt-HEMS-1234567891")
+	configuration.SetAlternateIdentifier(fmt.Sprintf("eebus2mqtt-HEMS-%s", cfg.SN))
 
 	h.myService = service.NewService(configuration, h)
 	h.myService.SetLogging(h)
@@ -328,13 +354,13 @@ func (h *hems) run() {
 	_ = h.uccslpc.SetFailsafeDurationMinimum(2*time.Hour, true)
 
 	_ = h.uccslpp.SetProductionLimit(ucapi.LoadLimit{
-		Value:        float64(cfg.PVMax),
+		Value:        -1 * float64(cfg.PVMax),
 		IsChangeable: true,
 		IsActive:     false,
 	})
-	_ = h.uccslpp.SetFailsafeProductionActivePowerLimit(4200, true)
+	_ = h.uccslpp.SetFailsafeProductionActivePowerLimit(-4200, true)
 	_ = h.uccslpp.SetFailsafeDurationMinimum(2*time.Hour, true)
-	_ = h.uccslpp.SetProductionNominalMax(float64(cfg.PVMax))
+	_ = h.uccslpp.SetProductionNominalMax(-1 * float64(cfg.PVMax))
 
 	if len(remoteSki) == 0 {
 		fmt.Println("No Remote SKI provided, exiting.")
@@ -522,17 +548,35 @@ func (h *hems) OnLPPEvent(ski string, device spineapi.DeviceRemoteInterface, ent
 		// approve any write
 		for msgCounter, write := range pendingWrites {
 			fmt.Println("Approving LPP write with msgCounter", msgCounter, "and limit", write.Value, "W")
-			if write.IsActive {
-				if write.Duration == 0 {
-					h.uccslpp.ApproveOrDenyProductionLimit(msgCounter, false, "Duration zero")
-				} else {
-					h.uccslpp.ApproveOrDenyProductionLimit(msgCounter, true, "")
 
+			fmt.Println("LPP msgCounter", msgCounter, " limit", write.Value, " duration ", write.Duration, " Active: ", write.IsActive)
+
+			if write.IsActive {
+				switch {
+				case write.Duration == 0:
+					h.uccslpp.ApproveOrDenyProductionLimit(msgCounter, false, "Duration zero")
+					WriteLog(logfile, Info, fmt.Sprintf("Msg %d: Production Limit denied: Duration zero.", msgCounter))
+
+				case write.Value > 0:
+					h.uccslpp.ApproveOrDenyProductionLimit(msgCounter, false, "Value > 0")
+					WriteLog(logfile, Info, fmt.Sprintf("Msg %d: Production Limit denied: Value > 0.", msgCounter))
+
+				default:
+					h.uccslpp.ApproveOrDenyProductionLimit(msgCounter, true, "")
 				}
 			} else {
-				h.uccslpp.ApproveOrDenyProductionLimit(msgCounter, true, "")
+				if write.Value > 0 {
+					h.uccslpp.ApproveOrDenyProductionLimit(msgCounter, false, "Value > 0")
+					WriteLog(logfile, Info, fmt.Sprintf("Msg %d: Production Limit denied: Value > 0.", msgCounter))
+				} else {
+					h.uccslpp.ApproveOrDenyProductionLimit(msgCounter, true, "")
+					WriteLog(logfile, StateUnlimitedControlled)
+				}
+
 			}
+
 		}
+
 	case cslpp.DataUpdateLimit:
 		if currentLimit, err := h.uccslpp.ProductionLimit(); err == nil {
 			fmt.Println("New LPP Limit set to", currentLimit.Value, "W. Is Active:", currentLimit.IsActive)
@@ -619,7 +663,7 @@ func (h *hems) RemoteSKIConnected(service api.ServiceInterface, ski string) {
 	cfg := config.Hems
 	time.AfterFunc(3*time.Second, func() {
 		_ = h.uccslpc.SetConsumptionNominalMax(32000)
-		_ = h.uccslpp.SetProductionNominalMax(float64(cfg.PVMax))
+		_ = h.uccslpp.SetProductionNominalMax(-1 * float64(cfg.PVMax))
 		println("starte ekg")
 		go EKG(h)
 	})

@@ -44,3 +44,23 @@
 2025-11-17 22:40:10 | unlimitedControlled | 
 2025-11-17 22:41:47 | limited | 10000 W
 2025-11-17 22:41:56 | unlimitedControlled | 
+2025-11-20 20:29:50 | init | 
+2025-11-20 20:29:58 | unlimitedControlled | 
+2025-11-20 20:30:44 | unknown | Production Limit denied: Duration zero.
+2025-11-20 21:05:08 | init | 
+2025-11-20 21:05:14 | unlimitedControlled | 
+2025-11-20 21:05:44 | unlimitedControlled | 
+2025-11-20 21:07:19 | init | 
+2025-11-20 21:07:32 | unlimitedControlled | 
+2025-11-20 21:07:54 | unknown | Msg 23: Production Limit denied: Duration zero.
+2025-11-20 21:08:20 | limited | -11500 W
+2025-11-20 21:08:23 | unlimitedControlled | 
+2025-11-20 21:08:49 | unlimitedControlled | 
+2025-11-20 21:13:36 | unlimitedControlled | 
+2025-11-20 21:21:45 | failsafe | -4200 W
+2025-11-20 21:31:45 | init | 
+2025-11-20 21:31:49 | unlimitedControlled | 
+2025-11-20 21:34:14 | init | 
+2025-11-20 21:34:18 | unlimitedControlled | 
+2025-11-20 21:35:42 | init | 
+2025-11-20 21:35:47 | unlimitedControlled | 
