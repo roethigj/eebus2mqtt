@@ -1,0 +1,25 @@
+name: Archive Latest Commit
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # vollständige Historie optional, aber nicht nötig
+
+      - name: Create archive folder
+        run: mkdir -p archive
+
+      - name: Zip latest commit
+        run: |
+          zip -r "archive/repo_latest_$(date +'%Y-%m-%d_%H-%M-%S').zip" . \
+            -x "archive/*" \
+            -x ".git/*"
