@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/tls"
@@ -12,8 +13,18 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
+
+	"crypto/aes"
+	"crypto/cipher"
+	"errors"
+	"regexp"
+
+	"encoding/base64"
+
+	"golang.org/x/crypto/argon2"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/enbility/eebus-go/api"
@@ -39,12 +50,14 @@ type Config struct {
 }
 
 type HemsConfig struct {
-	CertFile  string `json:"certFile"`
-	KeyFile   string `json:"keyFile"`
-	RemoteSKI string `json:"remoteSki"`
-	Port      int    `json:"port"`
-	PVMax     int    `json:"pv_max"`
-	SN        string `json:"serial_number"`
+	CertFile         string `json:"certFile"`
+	KeyFile          string `json:"keyFile"`
+	RemoteSKI        string `json:"remoteSki"`
+	Port             int    `json:"port"`
+	PVMax            int    `json:"pv_max"`
+	Failsafe         string `json:"failsafe"`
+	FailsafeDuration string `json:"failsafe_duration"`
+	SN               string `json:"serial_number"`
 }
 type MqttConfig struct {
 	Broker   string `json:"mqttBroker"`
@@ -60,6 +73,7 @@ var logfile string = "./status.log"
 var client mqtt.Client
 var ekg time.Time = time.Now()
 var isFailsafe bool = false
+var cancel context.CancelFunc
 
 type SystemState int
 
@@ -80,9 +94,10 @@ func init() {
 	var certificate tls.Certificate
 	// check for log
 	_, err := os.Open(logfile)
-	log.Println("Info_init: no log file found — I will generate it.")
 
 	if err != nil {
+		log.Println("Info_init: no log file found — I will generate it.")
+
 		//check for HA log
 		if _, err := os.Stat("/config"); !os.IsNotExist(err) {
 			logfile = "/config/status.log"
@@ -129,7 +144,7 @@ func init() {
 	decoder := json.NewDecoder(cfgPath)
 	err = decoder.Decode(&config)
 	if err != nil {
-		log.Fatalf("1Unable to marshal JSON due to %s", err)
+		log.Fatalf("Unable to marshal JSON due to %s", err)
 		//log.Println("Warning: failed to parse config.json:", err)
 	}
 
@@ -253,6 +268,7 @@ func generateConfic(conffile string) {
 			RemoteSKI: "",
 			Port:      0,
 			PVMax:     10000,
+			Failsafe:  "",
 			SN:        sn,
 		},
 		Mqtt: MqttConfig{
@@ -358,9 +374,15 @@ func (h *hems) run() {
 		IsChangeable: true,
 		IsActive:     false,
 	})
-	_ = h.uccslpp.SetFailsafeProductionActivePowerLimit(-4200, true)
-	_ = h.uccslpp.SetFailsafeDurationMinimum(2*time.Hour, true)
+
+	fs, fd := getFailsafeLPP()
+	_ = h.uccslpp.SetFailsafeProductionActivePowerLimit(float64(fs), true)
+	_ = h.uccslpp.SetFailsafeDurationMinimum(time.Duration(fd)*time.Second, true)
 	_ = h.uccslpp.SetProductionNominalMax(-1 * float64(cfg.PVMax))
+
+	client.Publish("eebus2mqtt/hems/lpp/allowed_production", 1, false, fmt.Sprintf("%d", fs))
+	client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", true))
+	WriteLog(logfile, StateInit, fmt.Sprintf("%.d W during int", fs))
 
 	if len(remoteSki) == 0 {
 		fmt.Println("No Remote SKI provided, exiting.")
@@ -369,8 +391,47 @@ func (h *hems) run() {
 
 	h.myService.RegisterRemoteSKI(remoteSki, "")
 	// print("test ski ", h.myService.LocalService().SKI())
-
 	h.myService.Start()
+
+}
+
+func getFailsafeLPP() (limit int, duration int) {
+
+	if config.Hems.KeyFile == "" {
+		//first run
+		limit = 4200
+		duration = 7200
+		config.Hems.Failsafe, _ = encryptPassword(strconv.Itoa(limit))
+		config.Hems.FailsafeDuration, _ = encryptPassword(strconv.Itoa(duration))
+		file, _ := os.Create(configfile)
+		encoder := json.NewEncoder(file)
+		encoder.SetIndent("", "  ")
+		_ = encoder.Encode(config)
+		file.Close()
+		return limit, duration
+	} else {
+		fs, err := decryptPassword(config.Hems.Failsafe)
+		if err != nil {
+			limit = 0
+		} else {
+			limit, err = strconv.Atoi(fs)
+			if err != nil {
+				limit = 0
+			}
+
+		}
+		fd, err := decryptPassword(config.Hems.FailsafeDuration)
+		if err != nil {
+			duration = 86400
+		} else {
+			duration, err = strconv.Atoi(fd)
+			if err != nil {
+				duration = 86400
+			}
+
+		}
+		return limit, duration
+	}
 }
 
 // Find available port
@@ -400,61 +461,83 @@ func availablePort(port int) (hemsport int) {
 }
 
 func EKG(h *hems) {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-	limited_written := false
-	unlimited_written := false
 
-	allowedproduction, _ := h.uccslpp.ProductionNominalMax()
-	for range ticker.C {
-		wait := time.Now()
-		since := wait.Sub(ekg)
-		client.Publish("eebus2mqtt/hems/lpp/last_heartbeat", 1, false, fmt.Sprintf("%.f", since.Seconds()))
-		client.Publish("eebus2mqtt/hems/lpp/allowed_production", 1, false, fmt.Sprintf("%.f", allowedproduction))
-
-		if since.Seconds() > 120 && !isFailsafe {
-			l, _, _ := h.uccslpp.FailsafeProductionActivePowerLimit()
-			allowedproduction = l
-			isFailsafe = true
-
-			client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", isFailsafe))
-			WriteLog(logfile, StateFailsafe, fmt.Sprintf("%.0f W", allowedproduction))
-			go FailsafeCountdown(h)
-		}
-		if since.Seconds() <= 120 {
-			isFailsafe = false
-			productionlimit, _ := h.uccslpp.ProductionLimit()
-
-			if productionlimit.IsActive && productionlimit.Duration.Seconds() > 0 {
-				allowedproduction = productionlimit.Value
-				client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", productionlimit.IsActive))
-				client.Publish("eebus2mqtt/hems/lpp/LimitCountdown", 1, false, fmt.Sprintf("%.f", productionlimit.Duration.Seconds()))
-
-				if !limited_written {
-					WriteLog(logfile, StateLimited, fmt.Sprintf("%.0f W", allowedproduction))
-					limited_written = true
-					unlimited_written = false
-				}
-
-			} else {
-				if productionlimit.Duration.Seconds() < 1 {
-					productionlimit.IsActive = false
-
-					allowedproduction, _ = h.uccslpp.ProductionNominalMax()
-					client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", productionlimit.IsActive))
-					client.Publish("eebus2mqtt/hems/lpp/LimitCountdown", 1, false, fmt.Sprintf("%.f", productionlimit.Duration.Seconds()))
-
-					if !unlimited_written {
-						WriteLog(logfile, StateUnlimitedControlled)
-						limited_written = false
-						unlimited_written = true
-					}
-				}
-
-			}
-		}
+	if cancel != nil {
+		cancel() // signalisiert der laufenden Goroutine das Ende
 	}
 
+	var ctx context.Context
+	ctx, cancel = context.WithCancel(context.Background())
+
+	go func() {
+
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		limited_written := false
+		unlimited_written := false
+
+		ap, _ := h.uccslpp.ProductionNominalMax()
+		allowedproduction := -1 * ap
+
+		for {
+			select {
+
+			case <-ctx.Done(): // Stop-Signal
+				return
+
+			case <-ticker.C:
+				wait := time.Now()
+				since := wait.Sub(ekg)
+				client.Publish("eebus2mqtt/hems/lpp/last_heartbeat", 1, false, fmt.Sprintf("%.f", since.Seconds()))
+				client.Publish("eebus2mqtt/hems/lpp/allowed_production", 1, false, fmt.Sprintf("%.f", allowedproduction))
+				//fs, _, _ := h.uccslpp.FailsafeProductionActivePowerLimit()
+				//println("FS: ", fs)
+				if since.Seconds() > 120 && !isFailsafe {
+					l, _, _ := h.uccslpp.FailsafeProductionActivePowerLimit()
+					allowedproduction = l
+					isFailsafe = true
+
+					client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", isFailsafe))
+					WriteLog(logfile, StateFailsafe, fmt.Sprintf("%.0f W", allowedproduction))
+					go FailsafeCountdown(h)
+				}
+				if since.Seconds() <= 120 {
+					isFailsafe = false
+					productionlimit, _ := h.uccslpp.ProductionLimit()
+
+					if productionlimit.IsActive && productionlimit.Duration.Seconds() > 0 {
+						allowedproduction = -1 * productionlimit.Value
+						client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", productionlimit.IsActive))
+						client.Publish("eebus2mqtt/hems/lpp/LimitCountdown", 1, false, fmt.Sprintf("%.f", productionlimit.Duration.Seconds()))
+
+						if !limited_written {
+							WriteLog(logfile, StateLimited, fmt.Sprintf("%.0f W", allowedproduction))
+							limited_written = true
+							unlimited_written = false
+						}
+
+					} else {
+						if productionlimit.Duration.Seconds() < 1 {
+							productionlimit.IsActive = false
+
+							ap, _ := h.uccslpp.ProductionNominalMax()
+							allowedproduction = -1 * ap
+							client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", productionlimit.IsActive))
+							client.Publish("eebus2mqtt/hems/lpp/LimitCountdown", 1, false, fmt.Sprintf("%.f", productionlimit.Duration.Seconds()))
+
+							if !unlimited_written {
+								WriteLog(logfile, StateUnlimitedControlled)
+								limited_written = false
+								unlimited_written = true
+							}
+						}
+
+					}
+				}
+			}
+		}
+
+	}()
 }
 
 func FailsafeCountdown(h *hems) {
@@ -605,16 +688,31 @@ func (h *hems) OnLPPEvent(ski string, device spineapi.DeviceRemoteInterface, ent
 	// 		client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
 	// 	}
 	case cslpp.DataUpdateFailsafeProductionActivePowerLimit:
-		if currentLimit, isChangeable, err := h.uccslpp.FailsafeProductionActivePowerLimit(); err == nil {
+		if currentLimit, _, err := h.uccslpp.FailsafeProductionActivePowerLimit(); err == nil {
 			fmt.Println("New LPP Failsafe Production Active Power Limit set to", currentLimit, "W")
-			fmt.Println("Is Changeable:", isChangeable)
+			failsafe := int(currentLimit)
+			config.Hems.Failsafe, _ = encryptPassword(strconv.Itoa(failsafe))
+			file, _ := os.Create(configfile)
+			encoder := json.NewEncoder(file)
+			encoder.SetIndent("", "  ")
+			_ = encoder.Encode(config)
+			file.Close()
+			// fmt.Println("Is Changeable:", isChangeable)
 			// client.Publish("eebus2mqtt/hems/lpp/failsafe_limit", 1, false, fmt.Sprintf("%.f", currentLimit))
 			// client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
 		}
 	case cslpp.DataUpdateFailsafeDurationMinimum:
-		if duration, isChangeable, err := h.uccslpp.FailsafeDurationMinimum(); err == nil {
+		if duration, _, err := h.uccslpp.FailsafeDurationMinimum(); err == nil {
 			fmt.Println("New LPP Failsafe Duration Minimum set to", duration)
-			fmt.Println("Is Changeable:", isChangeable)
+			fd := int(duration.Seconds())
+			config.Hems.FailsafeDuration, _ = encryptPassword(strconv.Itoa(fd))
+			file, _ := os.Create(configfile)
+			encoder := json.NewEncoder(file)
+			encoder.SetIndent("", "  ")
+			_ = encoder.Encode(config)
+			file.Close()
+
+			// fmt.Println("Is Changeable:", isChangeable)
 			// client.Publish("eebus2mqtt/hems/lpp/failsafe_duration", 1, false, fmt.Sprintf("%.f", duration.Seconds()))
 			// client.Publish("eebus2mqtt/hems/lpp/failsafe_changeable", 1, false, fmt.Sprintf("%t", isChangeable))
 		}
@@ -665,7 +763,8 @@ func (h *hems) RemoteSKIConnected(service api.ServiceInterface, ski string) {
 		_ = h.uccslpc.SetConsumptionNominalMax(32000)
 		_ = h.uccslpp.SetProductionNominalMax(-1 * float64(cfg.PVMax))
 		println("starte ekg")
-		go EKG(h)
+
+		EKG(h)
 	})
 }
 
@@ -723,11 +822,22 @@ func sub(client mqtt.Client) {
 func mqttConnect() {
 	var broker = config.Mqtt.Broker
 	var port = config.Mqtt.Port
+	if len(config.Mqtt.Password) < 25 {
+		config.Mqtt.Password, _ = encryptPassword(config.Mqtt.Password)
+
+		file, _ := os.Create(configfile)
+		encoder := json.NewEncoder(file)
+		encoder.SetIndent("", "  ")
+		_ = encoder.Encode(config)
+		file.Close()
+	}
+	pw, _ := decryptPassword(config.Mqtt.Password)
+
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(fmt.Sprintf("tcp://%s:%d", broker, port))
 	opts.SetClientID(fmt.Sprintf("eebus2mqtt-hems-%d", time.Now().UnixNano()))
 	opts.SetUsername(config.Mqtt.Username)
-	opts.SetPassword(config.Mqtt.Password)
+	opts.SetPassword(pw)
 	opts.SetDefaultPublishHandler(messagePubHandler)
 	opts.OnConnect = connectHandler
 	opts.OnConnectionLost = connectLostHandler
@@ -735,6 +845,96 @@ func mqttConnect() {
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
 		println("MQTT failed:", token.Error())
 	}
+}
+
+func encryptPassword(plaintext string) (string, error) {
+	aead, _ := getKey() // liefert cipher.AEAD
+	nonceSize := aead.NonceSize()
+
+	// Nonce erzeugen
+	nonce := make([]byte, nonceSize)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+
+	// Verschlüsseln
+	ciphertext := aead.Seal(nil, nonce, []byte(plaintext), nil)
+
+	// nonce + ciphertext als Base64 zurückgeben
+	out := append(nonce, ciphertext...)
+	return base64.StdEncoding.EncodeToString(out), nil
+}
+
+func decryptPassword(encryptedBase64 string) (string, error) {
+	data, err := base64.StdEncoding.DecodeString(encryptedBase64)
+	if err != nil {
+		return "", err
+	}
+
+	aead, _ := getKey() // liefert cipher.AEAD
+	nonceSize := aead.NonceSize()
+
+	if len(data) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+
+	nonce := data[:nonceSize]
+	ciphertext := data[nonceSize:]
+
+	plaintext, err := aead.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", err
+	}
+
+	return string(plaintext), nil
+}
+
+func getKey() (cipher.AEAD, error) {
+
+	serial := config.Hems.SN
+	salt := []byte(serial)
+	pepper := []byte("ebus2mqtt")
+	// Prüfung: genau 10 Ziffern
+	ok, _ := regexp.MatchString(`^\d{10}$`, serial)
+	if !ok {
+		return nil, errors.New("serial_number must be exactly 10 digits")
+	}
+	if len(salt) < 8 {
+		return nil, errors.New("salt too short; recommend 16+ bytes")
+	}
+
+	// Argon2id parameter (empfohlen: an deine Umgebung anpassen)
+	var (
+		time    uint32 = 3         // Iterations
+		memory  uint32 = 64 * 1024 // 64 MB in KiB
+		threads uint8  = 4         // parallelism
+		keyLen         = 32        // 32 bytes = 256 bit
+	)
+
+	// combine salt and pepper for KDF salt input (pepper can be nil)
+	kdfSalt := make([]byte, len(salt)+len(pepper))
+	copy(kdfSalt, salt)
+	copy(kdfSalt[len(salt):], pepper)
+
+	// Argon2id derivation
+	key := argon2.IDKey([]byte(serial), kdfSalt, time, memory, threads, uint32(keyLen))
+
+	// Erzeuge AES-256 block cipher
+	block, err := aes.NewCipher(key)
+	// sobald key nicht mehr gebraucht wird, überschreiben (best effort)
+	for i := range key {
+		key[i] = 0
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Erzeuge GCM AEAD
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	return aead, nil
 }
 
 // main app
