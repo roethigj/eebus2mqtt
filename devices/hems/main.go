@@ -378,7 +378,7 @@ func (h *hems) run() {
 	fs, fd := getFailsafeLPP()
 	_ = h.uccslpp.SetFailsafeProductionActivePowerLimit(float64(fs), true)
 	_ = h.uccslpp.SetFailsafeDurationMinimum(time.Duration(fd)*time.Second, true)
-	_ = h.uccslpp.SetProductionNominalMax(-1 * float64(cfg.PVMax))
+	_ = h.uccslpp.SetProductionNominalMax(float64(cfg.PVMax))
 
 	client.Publish("eebus2mqtt/hems/lpp/allowed_production", 1, false, fmt.Sprintf("%d", fs))
 	client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", true))
@@ -476,8 +476,7 @@ func EKG(h *hems) {
 		limited_written := false
 		unlimited_written := false
 
-		ap, _ := h.uccslpp.ProductionNominalMax()
-		allowedproduction := -1 * ap
+		allowedproduction, _ := h.uccslpp.ProductionNominalMax()
 
 		for {
 			select {
@@ -520,8 +519,7 @@ func EKG(h *hems) {
 						if productionlimit.Duration.Seconds() < 1 {
 							productionlimit.IsActive = false
 
-							ap, _ := h.uccslpp.ProductionNominalMax()
-							allowedproduction = -1 * ap
+							allowedproduction, _ = h.uccslpp.ProductionNominalMax()
 							client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", productionlimit.IsActive))
 							client.Publish("eebus2mqtt/hems/lpp/LimitCountdown", 1, false, fmt.Sprintf("%.f", productionlimit.Duration.Seconds()))
 
@@ -761,7 +759,7 @@ func (h *hems) RemoteSKIConnected(service api.ServiceInterface, ski string) {
 	cfg := config.Hems
 	time.AfterFunc(3*time.Second, func() {
 		_ = h.uccslpc.SetConsumptionNominalMax(32000)
-		_ = h.uccslpp.SetProductionNominalMax(-1 * float64(cfg.PVMax))
+		_ = h.uccslpp.SetProductionNominalMax(float64(cfg.PVMax))
 		println("starte ekg")
 
 		EKG(h)
