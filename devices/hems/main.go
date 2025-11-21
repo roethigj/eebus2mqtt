@@ -437,7 +437,7 @@ func getFailsafeLPP() (limit int, duration int) {
 // Find available port
 func availablePort(port int) (hemsport int) {
 	startPort := port
-	maxPort := startPort + 100
+	maxPort := startPort + 1
 	found := false
 	for p := startPort; p <= maxPort; p++ {
 		addr := fmt.Sprintf(":%d", p)
