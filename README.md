@@ -192,7 +192,7 @@ Bei "RemoteDeniedTrust" wird:
 
 ## 📜 Lizenz
 
-
+Lizenz: [MIT License](https://github.com/roethigj/eebus2mqtt?tab=MIT-1-ov-file)
 
 
 # Credits
