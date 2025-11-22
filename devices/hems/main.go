@@ -550,6 +550,8 @@ func FailsafeCountdown(h *hems) {
 		if failsafe_time <= d && isFailsafe {
 			cd := d - failsafe_time
 			client.Publish("eebus2mqtt/hems/lpp/FailsafeCountdown", 1, false, fmt.Sprintf("%.f", cd.Seconds()))
+			client.Publish("eebus2mqtt/hems/lpp/limit_activ", 1, false, fmt.Sprintf("%.t", isFailsafe))
+
 		} else {
 			client.Publish("eebus2mqtt/hems/lpp/FailsafeCountdown", 1, false, fmt.Sprintf("%.f", d.Seconds()))
 			ticker.Stop()
