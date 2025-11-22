@@ -96,7 +96,6 @@ func init() {
 	_, err := os.Open(logfile)
 
 	if err != nil {
-		log.Println("Info_init: no log file found — I will generate it.")
 
 		//check for HA log
 		if _, err := os.Stat("/config"); !os.IsNotExist(err) {
@@ -104,10 +103,14 @@ func init() {
 			_, err = os.Open(logfile)
 			if err != nil {
 				// HA first run?
+				log.Println("Info_init: no log file found — I will generate it.")
+
 				_, _ = os.Create(logfile)
 			}
 		} else {
 			// not HA
+			log.Println("Info_init: no log file found — I will generate it.")
+
 			_, _ = os.Create(logfile)
 		}
 	}
